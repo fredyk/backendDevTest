@@ -1,9 +1,11 @@
 package com.itx.similarproducts.infrastructure.client;
 
+import com.github.benmanes.caffeine.cache.Cache;
 import com.itx.similarproducts.domain.exception.ExistingApiException;
 import com.itx.similarproducts.domain.exception.ProductNotFoundException;
 import com.itx.similarproducts.domain.port.SimilarProductIdsPort;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Repository;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
@@ -15,14 +17,27 @@ import java.util.List;
 public class ExistingApiSimilarProductIdsAdapter implements SimilarProductIdsPort {
 
     private final RestClient restClient;
+    private final Cache<String, List<String>> cache;
 
-    public ExistingApiSimilarProductIdsAdapter(RestClient restClient) {
+    public ExistingApiSimilarProductIdsAdapter(RestClient restClient,
+                                               @Qualifier("similarProductIdsCache") Cache<String, List<String>> cache) {
         this.restClient = restClient;
+        this.cache = cache;
     }
 
     @Override
     @CircuitBreaker(name = "existingApi", fallbackMethod = "fallbackSimilarIds")
     public List<String> findSimilarIds(String productId) {
+        List<String> cached = cache.getIfPresent(productId);
+        if (cached != null) {
+            return cached;
+        }
+        List<String> similarIds = requestSimilarIds(productId);
+        cache.put(productId, similarIds);
+        return similarIds;
+    }
+
+    private List<String> requestSimilarIds(String productId) {
         try {
             // The API sends numbers ([2,3,4]); reading them as strings keeps ids opaque to us.
             String[] ids = restClient.get()

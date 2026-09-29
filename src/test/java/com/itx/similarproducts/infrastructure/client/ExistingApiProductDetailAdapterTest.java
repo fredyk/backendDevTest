@@ -1,5 +1,7 @@
 package com.itx.similarproducts.infrastructure.client;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.itx.similarproducts.domain.exception.ExistingApiException;
 import com.itx.similarproducts.domain.exception.ProductNotFoundException;
@@ -14,6 +16,7 @@ import java.util.Optional;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
+import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -30,7 +33,11 @@ class ExistingApiProductDetailAdapterTest {
     void setUp() {
         server = new WireMockServer(options().dynamicPort());
         server.start();
-        adapter = new ExistingApiProductDetailAdapter(RestClients.withReadTimeout(server.port(), Duration.ofMillis(1000)));
+        Cache<String, ProductDetail> cache = Caffeine.newBuilder()
+                .expireAfterWrite(Duration.ofSeconds(5))
+                .maximumSize(100)
+                .build();
+        adapter = new ExistingApiProductDetailAdapter(RestClients.withReadTimeout(server.port(), Duration.ofMillis(1000)), cache);
     }
 
     @AfterEach
@@ -79,5 +86,48 @@ class ExistingApiProductDetailAdapterTest {
 
         assertThatThrownBy(() -> adapter.findProductDetail("1000"))
                 .isInstanceOf(ExistingApiException.class);
+    }
+
+    @Test
+    void should_serve_repeated_calls_from_cache() {
+        server.stubFor(get(urlEqualTo("/product/2"))
+                .willReturn(aResponse().withStatus(200)
+                        .withHeader("Content-Type", "application/json")
+                        .withBody(DRESS_JSON)));
+
+        adapter.findProductDetail("2");
+        adapter.findProductDetail("2");
+
+        server.verify(1, getRequestedFor(urlEqualTo("/product/2")));
+    }
+
+    @Test
+    void should_not_cache_not_found() {
+        server.stubFor(get(urlEqualTo("/product/5"))
+                .willReturn(aResponse().withStatus(404)
+                        .withHeader("Content-Type", "application/json")
+                        .withBody("{\"message\":\"Product not found\"}")));
+
+        assertThatThrownBy(() -> adapter.findProductDetail("5")).isInstanceOf(ProductNotFoundException.class);
+        assertThatThrownBy(() -> adapter.findProductDetail("5")).isInstanceOf(ProductNotFoundException.class);
+
+        server.verify(2, getRequestedFor(urlEqualTo("/product/5")));
+    }
+
+    @Test
+    void should_not_cache_failures() {
+        server.stubFor(get(urlEqualTo("/product/2"))
+                .willReturn(aResponse().withStatus(500)));
+
+        assertThatThrownBy(() -> adapter.findProductDetail("2")).isInstanceOf(ExistingApiException.class);
+
+        server.resetAll();
+        server.stubFor(get(urlEqualTo("/product/2"))
+                .willReturn(aResponse().withStatus(200)
+                        .withHeader("Content-Type", "application/json")
+                        .withBody(DRESS_JSON)));
+
+        assertThat(adapter.findProductDetail("2"))
+                .contains(new ProductDetail("2", "Dress", new BigDecimal("19.99"), true));
     }
 }

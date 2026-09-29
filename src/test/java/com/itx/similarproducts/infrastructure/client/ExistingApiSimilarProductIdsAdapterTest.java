@@ -1,5 +1,7 @@
 package com.itx.similarproducts.infrastructure.client;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.itx.similarproducts.domain.exception.ExistingApiException;
 import com.itx.similarproducts.domain.exception.ProductNotFoundException;
@@ -15,6 +17,7 @@ import java.util.List;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
+import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -29,7 +32,11 @@ class ExistingApiSimilarProductIdsAdapterTest {
     void setUp() {
         server = new WireMockServer(options().dynamicPort());
         server.start();
-        adapter = new ExistingApiSimilarProductIdsAdapter(RestClients.withReadTimeout(server.port(), Duration.ofMillis(1000)));
+        Cache<String, List<String>> cache = Caffeine.newBuilder()
+                .expireAfterWrite(Duration.ofSeconds(5))
+                .maximumSize(100)
+                .build();
+        adapter = new ExistingApiSimilarProductIdsAdapter(RestClients.withReadTimeout(server.port(), Duration.ofMillis(1000)), cache);
     }
 
     @AfterEach
@@ -89,5 +96,47 @@ class ExistingApiSimilarProductIdsAdapterTest {
                 CallNotPermittedException.createCallNotPermittedException(CircuitBreaker.ofDefaults("existingApi")));
 
         assertThat(result).isEqualTo(List.of());
+    }
+
+    @Test
+    void should_serve_repeated_calls_from_cache() {
+        server.stubFor(get(urlEqualTo("/product/1/similarids"))
+                .willReturn(aResponse().withStatus(200)
+                        .withHeader("Content-Type", "application/json")
+                        .withBody("[2,3,4]")));
+
+        adapter.findSimilarIds("1");
+        adapter.findSimilarIds("1");
+
+        server.verify(1, getRequestedFor(urlEqualTo("/product/1/similarids")));
+    }
+
+    @Test
+    void should_not_cache_not_found() {
+        server.stubFor(get(urlEqualTo("/product/999/similarids"))
+                .willReturn(aResponse().withStatus(404)
+                        .withHeader("Content-Type", "text/plain")
+                        .withBody("Not Found")));
+
+        assertThatThrownBy(() -> adapter.findSimilarIds("999")).isInstanceOf(ProductNotFoundException.class);
+        assertThatThrownBy(() -> adapter.findSimilarIds("999")).isInstanceOf(ProductNotFoundException.class);
+
+        server.verify(2, getRequestedFor(urlEqualTo("/product/999/similarids")));
+    }
+
+    @Test
+    void should_not_cache_failures() {
+        server.stubFor(get(urlEqualTo("/product/1/similarids"))
+                .willReturn(aResponse().withStatus(500)));
+
+        assertThatThrownBy(() -> adapter.findSimilarIds("1")).isInstanceOf(ExistingApiException.class);
+
+        server.resetAll();
+        server.stubFor(get(urlEqualTo("/product/1/similarids"))
+                .willReturn(aResponse().withStatus(200)
+                        .withHeader("Content-Type", "application/json")
+                        .withBody("[2]")));
+
+        assertThat(adapter.findSimilarIds("1")).containsExactly("2");
     }
 }
