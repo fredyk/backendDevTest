@@ -3,10 +3,13 @@ package com.itx.similarproducts.infrastructure.client;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.itx.similarproducts.domain.exception.ExistingApiException;
 import com.itx.similarproducts.domain.exception.ProductNotFoundException;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Method;
 import java.time.Duration;
 import java.util.List;
 
@@ -75,5 +78,16 @@ class ExistingApiSimilarProductIdsAdapterTest {
 
         assertThatThrownBy(() -> adapter.findSimilarIds("6"))
                 .isInstanceOf(ExistingApiException.class);
+    }
+
+    @Test
+    void should_return_empty_list_from_fallback_when_the_circuit_is_open() throws Exception {
+        Method fallback = ExistingApiSimilarProductIdsAdapter.class
+                .getDeclaredMethod("fallbackSimilarIds", String.class, Throwable.class);
+
+        Object result = fallback.invoke(adapter, "1",
+                CallNotPermittedException.createCallNotPermittedException(CircuitBreaker.ofDefaults("existingApi")));
+
+        assertThat(result).isEqualTo(List.of());
     }
 }

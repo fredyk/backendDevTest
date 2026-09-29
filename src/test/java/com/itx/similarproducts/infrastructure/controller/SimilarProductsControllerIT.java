@@ -2,6 +2,8 @@ package com.itx.similarproducts.infrastructure.controller;
 
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.itx.similarproducts.domain.model.ProductDetail;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -14,6 +16,13 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
@@ -39,9 +48,13 @@ class SimilarProductsControllerIT {
     @Autowired
     private TestRestTemplate restTemplate;
 
+    @Autowired
+    private CircuitBreakerRegistry circuitBreakerRegistry;
+
     @BeforeEach
-    void resetStubs() {
+    void resetStubsAndCircuitBreaker() {
         EXISTING_API.resetAll();
+        circuitBreakerRegistry.circuitBreaker("existingApi").reset();
         stubExistingApi();
     }
 
@@ -99,6 +112,83 @@ class SimilarProductsControllerIT {
                 .contains("\"name\":\"Dress\"")
                 .contains("\"price\":19.99")
                 .contains("\"availability\":true");
+    }
+
+    @Test
+    void should_not_count_product_not_found_as_circuit_breaker_failure() {
+        for (int i = 0; i < 6; i++) {
+            restTemplate.getForEntity("/product/4/similar", ProductDetail[].class);
+        }
+
+        CircuitBreaker circuitBreaker = circuitBreakerRegistry.circuitBreaker("existingApi");
+        assertThat(circuitBreaker.getMetrics().getNumberOfFailedCalls()).isZero();
+        assertThat(circuitBreaker.getState()).isEqualTo(CircuitBreaker.State.CLOSED);
+    }
+
+    @Test
+    void should_omit_product_details_when_the_circuit_breaker_is_open() {
+        EXISTING_API.stubFor(get(urlEqualTo("/product/7/similarids"))
+                .willReturn(aResponse().withStatus(500)));
+
+        ResponseEntity<ProductDetail[]> lastResponse = null;
+        for (int i = 0; i < 6; i++) {
+            lastResponse = restTemplate.getForEntity("/product/7/similar", ProductDetail[].class);
+        }
+
+        CircuitBreaker circuitBreaker = circuitBreakerRegistry.circuitBreaker("existingApi");
+        assertThat(circuitBreaker.getState()).isEqualTo(CircuitBreaker.State.OPEN);
+        assertThat(lastResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(lastResponse.getBody()).isEmpty();
+    }
+
+    // Under load the open circuit short-circuits thousands of calls into the fallback at once;
+    // this is the shape of the k6 run that once surfaced 500s.
+    @Test
+    void should_never_return_5xx_when_the_shared_circuit_breaker_is_open_for_similar_ids() throws Exception {
+        EXISTING_API.stubFor(get(urlEqualTo("/product/8/similarids"))
+                .willReturn(aResponse().withStatus(500)));
+        CircuitBreaker circuitBreaker = circuitBreakerRegistry.circuitBreaker("existingApi");
+        circuitBreaker.transitionToOpenState();
+
+        int threads = 40;
+        int iterations = 200;
+        AtomicInteger nonOkResponses = new AtomicInteger();
+        AtomicInteger nonEmptyBodies = new AtomicInteger();
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<?>> futures = new ArrayList<>();
+        for (int thread = 0; thread < threads; thread++) {
+            futures.add(pool.submit(() -> {
+                start.await();
+                for (int iteration = 0; iteration < iterations; iteration++) {
+                    ResponseEntity<String> response = restTemplate.getForEntity("/product/8/similar", String.class);
+                    if (response.getStatusCode() != HttpStatus.OK) {
+                        nonOkResponses.incrementAndGet();
+                    }
+                    if (!"[]".equals(response.getBody())) {
+                        nonEmptyBodies.incrementAndGet();
+                    }
+                }
+                return null;
+            }));
+        }
+        start.countDown();
+        for (Future<?> future : futures) {
+            future.get();
+        }
+        pool.shutdown();
+
+        assertThat(nonOkResponses).hasValue(0);
+        assertThat(nonEmptyBodies).hasValue(0);
+        assertThat(circuitBreaker.getState())
+                .isIn(CircuitBreaker.State.OPEN, CircuitBreaker.State.HALF_OPEN);
+
+        circuitBreaker.reset();
+        EXISTING_API.resetAll();
+        stubExistingApi();
+        ResponseEntity<String> notFound = restTemplate.getForEntity("/product/999/similar", String.class);
+        assertThat(notFound.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(notFound.getBody()).isNullOrEmpty();
     }
 
     // The same similarity graph and failure cases as shared/simulado/mocks.json, minus the slow products.
