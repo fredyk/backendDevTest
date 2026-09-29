@@ -5,14 +5,18 @@ import com.itx.similarproducts.domain.exception.ProductNotFoundException;
 import com.itx.similarproducts.domain.model.ProductDetail;
 import com.itx.similarproducts.domain.port.ProductDetailPort;
 import com.itx.similarproducts.domain.port.SimilarProductIdsPort;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -25,13 +29,20 @@ class GetSimilarProductsServiceTest {
 
     private FakeSimilarProductIdsPort similarProductIdsPort;
     private FakeProductDetailPort productDetailPort;
+    private ExecutorService executor;
     private GetSimilarProductsService service;
 
     @BeforeEach
     void setUp() {
         similarProductIdsPort = new FakeSimilarProductIdsPort();
         productDetailPort = new FakeProductDetailPort();
-        service = new GetSimilarProductsService(similarProductIdsPort, productDetailPort);
+        executor = Executors.newVirtualThreadPerTaskExecutor();
+        service = new GetSimilarProductsService(similarProductIdsPort, productDetailPort, executor);
+    }
+
+    @AfterEach
+    void tearDown() {
+        executor.shutdownNow();
     }
 
     @Test
@@ -118,6 +129,38 @@ class GetSimilarProductsServiceTest {
         assertThat(result).contains(List.of());
     }
 
+    @Test
+    void should_return_details_in_similar_ids_order_when_they_arrive_out_of_order() {
+        similarProductIdsPort.returnIds("2", "3", "4");
+        productDetailPort.returns(DRESS);
+        productDetailPort.returns(BLAZER);
+        productDetailPort.returns(BOOTS);
+        productDetailPort.delay("2", Duration.ofMillis(300));
+        productDetailPort.delay("3", Duration.ofMillis(150));
+
+        Optional<List<ProductDetail>> result = service.getSimilarProducts("1");
+
+        assertThat(result).contains(List.of(DRESS, BLAZER, BOOTS));
+    }
+
+    @Test
+    void should_fetch_product_details_in_parallel_three_detail_calls_of_300ms_finish_well_under_900ms() {
+        similarProductIdsPort.returnIds("2", "3", "4");
+        productDetailPort.returns(DRESS);
+        productDetailPort.returns(BLAZER);
+        productDetailPort.returns(BOOTS);
+        productDetailPort.delay("2", Duration.ofMillis(300));
+        productDetailPort.delay("3", Duration.ofMillis(300));
+        productDetailPort.delay("4", Duration.ofMillis(300));
+
+        long start = System.nanoTime();
+        Optional<List<ProductDetail>> result = service.getSimilarProducts("1");
+        long elapsedMillis = (System.nanoTime() - start) / 1_000_000;
+
+        assertThat(result).contains(List.of(DRESS, BLAZER, BOOTS));
+        assertThat(elapsedMillis).isLessThan(900);
+    }
+
     private static final class FakeSimilarProductIdsPort implements SimilarProductIdsPort {
 
         private List<String> ids = List.of();
@@ -144,6 +187,7 @@ class GetSimilarProductsServiceTest {
 
         private final Map<String, ProductDetail> details = new HashMap<>();
         private final Map<String, RuntimeException> failures = new HashMap<>();
+        private final Map<String, Duration> delays = new HashMap<>();
 
         void returns(ProductDetail detail) {
             details.put(detail.id(), detail);
@@ -153,13 +197,30 @@ class GetSimilarProductsServiceTest {
             failures.put(productId, failure);
         }
 
+        void delay(String productId, Duration duration) {
+            delays.put(productId, duration);
+        }
+
         @Override
         public Optional<ProductDetail> findProductDetail(String productId) {
+            Duration delay = delays.get(productId);
+            if (delay != null) {
+                sleep(delay);
+            }
             RuntimeException failure = failures.get(productId);
             if (failure != null) {
                 throw failure;
             }
             return Optional.ofNullable(details.get(productId));
+        }
+
+        private void sleep(Duration duration) {
+            try {
+                Thread.sleep(duration.toMillis());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
         }
     }
 }
