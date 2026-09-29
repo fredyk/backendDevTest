@@ -1,0 +1,10 @@
+target/
+.git/
+.gitignore
+shared/
+assets/
+*.md
+.mvn/
+mvnw
+mvnw.cmd
+docker-compose.yaml
