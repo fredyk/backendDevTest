@@ -6,6 +6,7 @@ import com.github.tomakehurst.wiremock.WireMockServer;
 import com.itx.similarproducts.domain.exception.ExistingApiException;
 import com.itx.similarproducts.domain.exception.ProductNotFoundException;
 import com.itx.similarproducts.domain.model.ProductDetail;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -27,6 +28,7 @@ class ExistingApiProductDetailAdapterTest {
     private static final String DRESS_JSON = "{\"id\":\"2\",\"name\":\"Dress\",\"price\":19.99,\"availability\":true}";
 
     private WireMockServer server;
+    private CircuitBreakerRegistry circuitBreakers;
     private ExistingApiProductDetailAdapter adapter;
 
     @BeforeEach
@@ -37,7 +39,8 @@ class ExistingApiProductDetailAdapterTest {
                 .expireAfterWrite(Duration.ofSeconds(5))
                 .maximumSize(100)
                 .build();
-        adapter = new ExistingApiProductDetailAdapter(RestClients.withReadTimeout(server.port(), Duration.ofMillis(1000)), cache);
+        circuitBreakers = CircuitBreakerRegistry.ofDefaults();
+        adapter = new ExistingApiProductDetailAdapter(RestClients.withReadTimeout(server.port(), Duration.ofMillis(1000)), cache, circuitBreakers);
     }
 
     @AfterEach
@@ -129,5 +132,27 @@ class ExistingApiProductDetailAdapterTest {
 
         assertThat(adapter.findProductDetail("2"))
                 .contains(new ProductDetail("2", "Dress", new BigDecimal("19.99"), true));
+    }
+
+    @Test
+    void should_serve_a_cached_detail_even_while_the_products_circuit_is_open() {
+        server.stubFor(get(urlEqualTo("/product/2"))
+                .willReturn(aResponse().withStatus(200)
+                        .withHeader("Content-Type", "application/json")
+                        .withBody(DRESS_JSON)));
+        adapter.findProductDetail("2");
+        circuitBreakers.circuitBreaker("productDetail-2").transitionToOpenState();
+
+        assertThat(adapter.findProductDetail("2"))
+                .contains(new ProductDetail("2", "Dress", new BigDecimal("19.99"), true));
+    }
+
+    @Test
+    void should_fail_fast_without_calling_the_api_when_the_products_circuit_is_open() {
+        circuitBreakers.circuitBreaker("productDetail-6").transitionToOpenState();
+
+        assertThatThrownBy(() -> adapter.findProductDetail("6"))
+                .isInstanceOf(ExistingApiException.class);
+        server.verify(0, getRequestedFor(urlEqualTo("/product/6")));
     }
 }

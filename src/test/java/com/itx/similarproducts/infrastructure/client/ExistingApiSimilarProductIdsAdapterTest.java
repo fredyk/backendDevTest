@@ -5,13 +5,11 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.itx.similarproducts.domain.exception.ExistingApiException;
 import com.itx.similarproducts.domain.exception.ProductNotFoundException;
-import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
-import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Method;
 import java.time.Duration;
 import java.util.List;
 
@@ -26,6 +24,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ExistingApiSimilarProductIdsAdapterTest {
 
     private WireMockServer server;
+    private CircuitBreakerRegistry circuitBreakers;
     private ExistingApiSimilarProductIdsAdapter adapter;
 
     @BeforeEach
@@ -36,7 +35,8 @@ class ExistingApiSimilarProductIdsAdapterTest {
                 .expireAfterWrite(Duration.ofSeconds(5))
                 .maximumSize(100)
                 .build();
-        adapter = new ExistingApiSimilarProductIdsAdapter(RestClients.withReadTimeout(server.port(), Duration.ofMillis(1000)), cache);
+        circuitBreakers = CircuitBreakerRegistry.ofDefaults();
+        adapter = new ExistingApiSimilarProductIdsAdapter(RestClients.withReadTimeout(server.port(), Duration.ofMillis(1000)), cache, circuitBreakers);
     }
 
     @AfterEach
@@ -88,14 +88,12 @@ class ExistingApiSimilarProductIdsAdapterTest {
     }
 
     @Test
-    void should_return_empty_list_from_fallback_when_the_circuit_is_open() throws Exception {
-        Method fallback = ExistingApiSimilarProductIdsAdapter.class
-                .getDeclaredMethod("fallbackSimilarIds", String.class, Throwable.class);
+    void should_fail_fast_without_calling_the_api_when_the_products_circuit_is_open() {
+        circuitBreakers.circuitBreaker("similarIds-1").transitionToOpenState();
 
-        Object result = fallback.invoke(adapter, "1",
-                CallNotPermittedException.createCallNotPermittedException(CircuitBreaker.ofDefaults("existingApi")));
-
-        assertThat(result).isEqualTo(List.of());
+        assertThatThrownBy(() -> adapter.findSimilarIds("1"))
+                .isInstanceOf(ExistingApiException.class);
+        server.verify(0, getRequestedFor(urlEqualTo("/product/1/similarids")));
     }
 
     @Test

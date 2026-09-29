@@ -4,7 +4,9 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.itx.similarproducts.domain.exception.ExistingApiException;
 import com.itx.similarproducts.domain.exception.ProductNotFoundException;
 import com.itx.similarproducts.domain.port.SimilarProductIdsPort;
-import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Repository;
 import org.springframework.web.client.HttpClientErrorException;
@@ -18,23 +20,34 @@ public class ExistingApiSimilarProductIdsAdapter implements SimilarProductIdsPor
 
     private final RestClient restClient;
     private final Cache<String, List<String>> cache;
+    private final CircuitBreakerRegistry circuitBreakers;
 
     public ExistingApiSimilarProductIdsAdapter(RestClient restClient,
-                                               @Qualifier("similarProductIdsCache") Cache<String, List<String>> cache) {
+                                               @Qualifier("similarProductIdsCache") Cache<String, List<String>> cache,
+                                               CircuitBreakerRegistry circuitBreakers) {
         this.restClient = restClient;
         this.cache = cache;
+        this.circuitBreakers = circuitBreakers;
     }
 
     @Override
-    @CircuitBreaker(name = "existingApi", fallbackMethod = "fallbackSimilarIds")
     public List<String> findSimilarIds(String productId) {
         List<String> cached = cache.getIfPresent(productId);
         if (cached != null) {
             return cached;
         }
-        List<String> similarIds = requestSimilarIds(productId);
+        List<String> similarIds = requestThroughCircuitBreaker(productId);
         cache.put(productId, similarIds);
         return similarIds;
+    }
+
+    private List<String> requestThroughCircuitBreaker(String productId) {
+        CircuitBreaker circuitBreaker = circuitBreakers.circuitBreaker("similarIds-" + productId);
+        try {
+            return circuitBreaker.executeSupplier(() -> requestSimilarIds(productId));
+        } catch (CallNotPermittedException e) {
+            throw new ExistingApiException("Circuit open for similar ids of product " + productId, e);
+        }
     }
 
     private List<String> requestSimilarIds(String productId) {
@@ -50,14 +63,5 @@ public class ExistingApiSimilarProductIdsAdapter implements SimilarProductIdsPor
         } catch (RestClientException e) {
             throw new ExistingApiException("Failed to fetch similar ids for product " + productId, e);
         }
-    }
-
-    // Public on purpose: Resilience4j calls fallbacks by reflection, and on a private method it
-    // toggles accessibility per call, which raced under load and let 500s through.
-    public List<String> fallbackSimilarIds(String productId, Throwable throwable) {
-        if (throwable instanceof ProductNotFoundException productNotFoundException) {
-            throw productNotFoundException;
-        }
-        return List.of();
     }
 }

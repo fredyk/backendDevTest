@@ -34,7 +34,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class SimilarProductsControllerIT {
 
     // Started statically so its port is known before the Spring context reads existing.api.base-url.
-    private static final WireMockServer EXISTING_API = new WireMockServer(options().dynamicPort());
+    private static final WireMockServer EXISTING_API = new WireMockServer(options().dynamicPort().containerThreads(100));
 
     static {
         EXISTING_API.start();
@@ -43,6 +43,7 @@ class SimilarProductsControllerIT {
     @DynamicPropertySource
     static void existingApiProperties(DynamicPropertyRegistry registry) {
         registry.add("existing.api.base-url", () -> "http://localhost:" + EXISTING_API.port());
+        registry.add("existing.api.read-timeout", () -> "300ms");
     }
 
     @Autowired
@@ -54,7 +55,7 @@ class SimilarProductsControllerIT {
     @BeforeEach
     void resetStubsAndCircuitBreaker() {
         EXISTING_API.resetAll();
-        circuitBreakerRegistry.circuitBreaker("existingApi").reset();
+        circuitBreakerRegistry.getAllCircuitBreakers().forEach(CircuitBreaker::reset);
         stubExistingApi();
     }
 
@@ -120,7 +121,7 @@ class SimilarProductsControllerIT {
             restTemplate.getForEntity("/product/4/similar", ProductDetail[].class);
         }
 
-        CircuitBreaker circuitBreaker = circuitBreakerRegistry.circuitBreaker("existingApi");
+        CircuitBreaker circuitBreaker = circuitBreakerRegistry.circuitBreaker("productDetail-5");
         assertThat(circuitBreaker.getMetrics().getNumberOfFailedCalls()).isZero();
         assertThat(circuitBreaker.getState()).isEqualTo(CircuitBreaker.State.CLOSED);
     }
@@ -135,19 +136,37 @@ class SimilarProductsControllerIT {
             lastResponse = restTemplate.getForEntity("/product/7/similar", ProductDetail[].class);
         }
 
-        CircuitBreaker circuitBreaker = circuitBreakerRegistry.circuitBreaker("existingApi");
+        CircuitBreaker circuitBreaker = circuitBreakerRegistry.circuitBreaker("similarIds-7");
         assertThat(circuitBreaker.getState()).isEqualTo(CircuitBreaker.State.OPEN);
         assertThat(lastResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(lastResponse.getBody()).isEmpty();
     }
 
-    // Under load the open circuit short-circuits thousands of calls into the fallback at once;
-    // this is the shape of the k6 run that once surfaced 500s.
     @Test
-    void should_never_return_5xx_when_the_shared_circuit_breaker_is_open_for_similar_ids() throws Exception {
+    void should_keep_serving_healthy_products_while_other_products_keep_timing_out() {
+        EXISTING_API.stubFor(get(urlEqualTo("/product/9/similarids"))
+                .willReturn(aResponse().withStatus(200)
+                        .withHeader("Content-Type", "application/json")
+                        .withBody("[1000,1001,1002,1003]")));
+        for (String slowId : List.of("1000", "1001", "1002", "1003")) {
+            EXISTING_API.stubFor(get(urlEqualTo("/product/" + slowId)).willReturn(aResponse().withFixedDelay(600)));
+        }
+        for (int i = 0; i < 6; i++) {
+            restTemplate.getForEntity("/product/9/similar", ProductDetail[].class);
+        }
+
+        ResponseEntity<ProductDetail[]> response = restTemplate.getForEntity("/product/1/similar", ProductDetail[].class);
+
+        assertThat(response.getBody()).extracting(ProductDetail::id).containsExactly("2", "3", "4");
+    }
+
+    // Under load an open circuit short-circuits thousands of calls at once; none of them may
+    // surface as a 5xx.
+    @Test
+    void should_never_return_5xx_when_the_circuit_breaker_is_open_for_similar_ids() throws Exception {
         EXISTING_API.stubFor(get(urlEqualTo("/product/8/similarids"))
                 .willReturn(aResponse().withStatus(500)));
-        CircuitBreaker circuitBreaker = circuitBreakerRegistry.circuitBreaker("existingApi");
+        CircuitBreaker circuitBreaker = circuitBreakerRegistry.circuitBreaker("similarIds-8");
         circuitBreaker.transitionToOpenState();
 
         int threads = 40;

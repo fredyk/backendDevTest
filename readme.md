@@ -81,7 +81,7 @@ com.itx.similarproducts
 | A similar product answers 404 or 500 | It is left out; the rest are returned in order |
 | A similar product is slow (100 ms, 1 s) | Details are fetched in parallel, so the response takes as long as the slowest one, not the sum |
 | A similar product is very slow (5 s, 50 s) | 2 s read timeout; it is left out |
-| The existing API keeps failing | A circuit breaker opens and answers from the fallback without calling it, until it recovers |
+| The existing API keeps failing for a product | That product's circuit breaker opens and it is left out straight away instead of costing a timeout, until it recovers |
 | The same product requested by many users | Responses are cached for 5 s |
 
 ## Decisions
@@ -89,8 +89,8 @@ com.itx.similarproducts
 - **Virtual threads** for both Tomcat and the detail requests. The work is blocking I/O, so one virtual thread per request is cheaper and simpler than sizing a pool or going reactive.
 - **Order is preserved** by collecting the futures in the order of the similar ids, not in the order they complete.
 - **Partial responses over errors.** One failing neighbour should not cost the customer the whole list. Only a missing main product is an error.
-- **One circuit breaker** shared by both endpoints, since they are the same upstream service. A 404 is an answer, not an outage, so it does not count as a failure.
-- **Fallback methods are public.** Resilience4j invokes them by reflection; on private methods it toggles accessibility on every call, which raced under load and produced 500s.
+- **One circuit breaker per product and endpoint.** With a single shared breaker, products 1000 and 10000 timing out opened the circuit for everyone, and product 1 started answering `[]` under load. Per product, a broken product only trips its own circuit. A 404 is an answer, not an outage, so it does not count as a failure.
+- **The cache sits in front of the breaker**, so a detail we already have is served even while that product's circuit is open.
 - **Only successes are cached.** A 404 or a failure is asked again next time, so a product that comes back is visible straight away.
 - **Timeouts and TTL are properties** (`existing.api.*`) and the base URL can be overridden with `EXISTING_API_BASE_URL`.
 
@@ -100,8 +100,9 @@ k6 against the app in Docker, all five scenarios at 200 VUs:
 
 | Metric | Value |
 |---|---|
-| Requests | 16,479 (265/s) |
-| Median | 2.75 ms |
-| p90 | 68 ms |
-| Max | 2.07 s (bounded by the read timeout) |
+| Requests | 18,062 (298/s) |
+| Median | 1.18 ms |
+| p90 | 109 ms |
+| p95 | 362 ms |
+| Max | 2.02 s (bounded by the read timeout) |
 | Errors in the app log | 0 |
