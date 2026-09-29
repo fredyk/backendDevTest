@@ -10,6 +10,9 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -23,6 +26,7 @@ import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+@ExtendWith(OutputCaptureExtension.class)
 class ExistingApiProductDetailAdapterTest {
 
     private static final String DRESS_JSON = "{\"id\":\"2\",\"name\":\"Dress\",\"price\":19.99,\"availability\":true}";
@@ -154,5 +158,25 @@ class ExistingApiProductDetailAdapterTest {
         assertThatThrownBy(() -> adapter.findProductDetail("6"))
                 .isInstanceOf(ExistingApiException.class);
         server.verify(0, getRequestedFor(urlEqualTo("/product/6")));
+    }
+
+    @Test
+    void should_log_a_warning_when_the_api_fails(CapturedOutput output) {
+        server.stubFor(get(urlEqualTo("/product/6"))
+                .willReturn(aResponse().withStatus(500)));
+
+        assertThatThrownBy(() -> adapter.findProductDetail("6")).isInstanceOf(ExistingApiException.class);
+
+        assertThat(output).contains("WARN").contains("product detail for product 6");
+    }
+
+    @Test
+    void should_not_log_a_warning_for_a_product_that_does_not_exist(CapturedOutput output) {
+        server.stubFor(get(urlEqualTo("/product/5"))
+                .willReturn(aResponse().withStatus(404)));
+
+        assertThatThrownBy(() -> adapter.findProductDetail("5")).isInstanceOf(ProductNotFoundException.class);
+
+        assertThat(output).doesNotContain("WARN");
     }
 }

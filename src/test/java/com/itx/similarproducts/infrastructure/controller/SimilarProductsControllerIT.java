@@ -7,8 +7,11 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -31,6 +34,7 @@ import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options
 import static org.assertj.core.api.Assertions.assertThat;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@ExtendWith(OutputCaptureExtension.class)
 class SimilarProductsControllerIT {
 
     // Started statically so its port is known before the Spring context reads existing.api.base-url.
@@ -43,7 +47,7 @@ class SimilarProductsControllerIT {
     @DynamicPropertySource
     static void existingApiProperties(DynamicPropertyRegistry registry) {
         registry.add("existing.api.base-url", () -> "http://localhost:" + EXISTING_API.port());
-        registry.add("existing.api.read-timeout", () -> "300ms");
+        registry.add("existing.api.read-timeout", () -> "1s");
     }
 
     @Autowired
@@ -149,7 +153,7 @@ class SimilarProductsControllerIT {
                         .withHeader("Content-Type", "application/json")
                         .withBody("[1000,1001,1002,1003]")));
         for (String slowId : List.of("1000", "1001", "1002", "1003")) {
-            EXISTING_API.stubFor(get(urlEqualTo("/product/" + slowId)).willReturn(aResponse().withFixedDelay(600)));
+            EXISTING_API.stubFor(get(urlEqualTo("/product/" + slowId)).willReturn(aResponse().withFixedDelay(1500)));
         }
         for (int i = 0; i < 6; i++) {
             restTemplate.getForEntity("/product/9/similar", ProductDetail[].class);
@@ -158,6 +162,26 @@ class SimilarProductsControllerIT {
         ResponseEntity<ProductDetail[]> response = restTemplate.getForEntity("/product/1/similar", ProductDetail[].class);
 
         assertThat(response.getBody()).extracting(ProductDetail::id).containsExactly("2", "3", "4");
+    }
+
+    @Test
+    void should_report_up_on_the_health_endpoint() {
+        ResponseEntity<String> response = restTemplate.getForEntity("/actuator/health", String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).contains("\"status\":\"UP\"");
+    }
+
+    @Test
+    void should_log_when_a_products_circuit_opens(CapturedOutput output) {
+        EXISTING_API.stubFor(get(urlEqualTo("/product/7/similarids"))
+                .willReturn(aResponse().withStatus(500)));
+
+        for (int i = 0; i < 6; i++) {
+            restTemplate.getForEntity("/product/7/similar", ProductDetail[].class);
+        }
+
+        assertThat(output).contains("Circuit breaker similarIds-7 changed from CLOSED to OPEN");
     }
 
     // Under load an open circuit short-circuits thousands of calls at once; none of them may

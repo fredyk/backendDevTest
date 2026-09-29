@@ -92,6 +92,7 @@ com.itx.similarproducts
 - **One circuit breaker per product and endpoint.** With a single shared breaker, products 1000 and 10000 timing out opened the circuit for everyone, and product 1 started answering `[]` under load. Per product, a broken product only trips its own circuit. A 404 is an answer, not an outage, so it does not count as a failure.
 - **The cache sits in front of the breaker**, so a detail we already have is served even while that product's circuit is open.
 - **Only successes are cached.** A 404 or a failure is asked again next time, so a product that comes back is visible straight away.
+- **Logs say what matters, once.** A real upstream failure logs a warning; a 404 does not, and an open circuit is logged when it opens, not on every call it rejects. `/actuator/health` backs the container health check, and `/actuator/metrics` includes the circuit breaker states.
 - **Timeouts and TTL are properties** (`existing.api.*`) and the base URL can be overridden with `EXISTING_API_BASE_URL`.
 
 ## Results

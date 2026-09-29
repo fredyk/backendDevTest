@@ -8,6 +8,8 @@ import com.itx.similarproducts.domain.port.ProductDetailPort;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Repository;
 import org.springframework.web.client.HttpClientErrorException;
@@ -18,6 +20,8 @@ import java.util.Optional;
 
 @Repository
 public class ExistingApiProductDetailAdapter implements ProductDetailPort {
+
+    private static final Logger log = LoggerFactory.getLogger(ExistingApiProductDetailAdapter.class);
 
     private final RestClient restClient;
     private final Cache<String, ProductDetail> cache;
@@ -69,6 +73,9 @@ public class ExistingApiProductDetailAdapter implements ProductDetailPort {
             throw new ProductNotFoundException(productId, e);
         } catch (RestClientException e) {
             // Read timeouts land here too: the JDK client wraps them in a ResourceAccessException.
+            // Only real upstream failures are logged: a 404 is an answer, and an open circuit
+            // is already reported once, when it opens.
+            log.warn("Failed to fetch product detail for product {}: {}", productId, e.getMessage());
             throw new ExistingApiException("Failed to fetch product detail for product " + productId, e);
         }
     }

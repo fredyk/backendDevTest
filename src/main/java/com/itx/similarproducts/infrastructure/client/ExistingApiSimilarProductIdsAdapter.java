@@ -7,6 +7,8 @@ import com.itx.similarproducts.domain.port.SimilarProductIdsPort;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Repository;
 import org.springframework.web.client.HttpClientErrorException;
@@ -17,6 +19,8 @@ import java.util.List;
 
 @Repository
 public class ExistingApiSimilarProductIdsAdapter implements SimilarProductIdsPort {
+
+    private static final Logger log = LoggerFactory.getLogger(ExistingApiSimilarProductIdsAdapter.class);
 
     private final RestClient restClient;
     private final Cache<String, List<String>> cache;
@@ -61,6 +65,7 @@ public class ExistingApiSimilarProductIdsAdapter implements SimilarProductIdsPor
         } catch (HttpClientErrorException.NotFound e) {
             throw new ProductNotFoundException(productId, e);
         } catch (RestClientException e) {
+            log.warn("Failed to fetch similar ids for product {}: {}", productId, e.getMessage());
             throw new ExistingApiException("Failed to fetch similar ids for product " + productId, e);
         }
     }

@@ -9,6 +9,9 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 
 import java.time.Duration;
 import java.util.List;
@@ -21,6 +24,7 @@ import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+@ExtendWith(OutputCaptureExtension.class)
 class ExistingApiSimilarProductIdsAdapterTest {
 
     private WireMockServer server;
@@ -136,5 +140,15 @@ class ExistingApiSimilarProductIdsAdapterTest {
                         .withBody("[2]")));
 
         assertThat(adapter.findSimilarIds("1")).containsExactly("2");
+    }
+
+    @Test
+    void should_log_a_warning_when_the_api_fails(CapturedOutput output) {
+        server.stubFor(get(urlEqualTo("/product/6/similarids"))
+                .willReturn(aResponse().withStatus(500)));
+
+        assertThatThrownBy(() -> adapter.findSimilarIds("6")).isInstanceOf(ExistingApiException.class);
+
+        assertThat(output).contains("WARN").contains("similar ids for product 6");
     }
 }
